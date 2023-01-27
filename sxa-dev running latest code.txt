@@ -1,0 +1,504 @@
+name: Dev Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  
+jobs:  
+  prerequisites:
+   runs-on: self-hosted
+   environment: Dev
+   name: Prerequisites Steps
+   if: github.ref == 'refs/heads/main'
+    
+   steps:
+      # Cleanup previous deployment directories
+      - name: Cleanup deployment directories
+        run: |
+          $directoriesToRemove = @("${{ github.workspace }}\d\a","${{ github.workspace }}\d\c","${{ github.workspace }}\d\d")
+          foreach ($directory in $directoriesToRemove)
+          {
+            if (Test-Path $directory)
+            {
+              try {
+                Remove-Item $directory -Force -Recurse
+              }
+              catch {
+                Write-Host "An error occurred:"
+                Write-Host $_.Exception.Message
+                exit 1
+              }
+            }
+            else {
+              Write-Host "The directory $directory does not exist"
+              Write-Host "Deploy can continue"
+            }
+          }
+      # Create new deployment directories
+      - name: Create Deployment Directories
+        run: |
+          $directoriesToCreate = @("a","c","d","cm","cd")
+          foreach ($directory in $directoriesToCreate)
+          {
+            if (($directory -like "cm") -OR ($directory -like "cd"))
+            {
+              try {
+               New-Item -Path ${{ github.workspace }}\d\a -Name $directory -ItemType "directory"
+              }
+              catch {
+               Write-Host "Could not create $directory"
+               Write-Host $_.Exception.Message
+               exit 1
+              }
+            }
+            else {
+              try {
+               New-Item -Path ${{ github.workspace }}\d -Name $directory -ItemType "directory"
+              }
+              catch {
+               Write-Host "Could not create $directory"
+               Write-Host $_.Exception.Message
+               exit 1
+              }
+            }
+          }
+        
+  # Checkout code, to get the latest version of the repository
+  checkout-code:
+    needs: prerequisites # To be executed, it requires the prerequisites step to be successfully finished
+    runs-on: self-hosted
+    name: Checkout code
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+     # Calls the checkout process to the ${{ github.workspace }}\c folder
+     - name: Checkout code
+       uses: actions/checkout@v2
+       with:
+         path: .\d\c
+
+  # Build the solution step
+  build-solution:
+    needs: checkout-code # To be executed, it requires the checkout-code step to be sucessfully finished
+    runs-on: self-hosted
+    name: Build
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+     # Install NuGet in GitHub Runner agent VM
+     - name: Install NuGet
+       uses: NuGet/setup-nuget@v1.0.5
+     
+     # Nuget restore package
+     - name: NuGet restore
+       run: |
+         nuget.exe restore .\d\c\NTTDataAmerica\NTTDataAmerica.sln
+     
+     # Checks the MsBuild installation on the GitHub Runner agent VM
+     - name: Setup Msbuild
+       uses: microsoft/setup-msbuild@v1.0.3
+       with:
+        vswhere-path: 'C:\Program Files (x86)\Microsoft Visual Studio\Installer'
+     
+     - name: Build DEV CM
+       if: ${{ success() }}
+       run: |   
+        msbuild .\d\c\NTTDataAmerica\NTTDataAmerica.sln /restore /p:DeployOnBuild=true /p:WebPublishMethod=FileSystem /p:Configuration=DEVCM  /p:SkipInvalidConfigurations=true /p:PackageLocation=${{ github.workspace}}\d\a\cm /p:PublishUrl=${{ github.workspace}}\d\a\cm /p:DeployDefaultTarget=WebPublish 
+     # Executes the MsBuild to perform the build of the Visual Studio Solution
+     # /p:Configuration=DEVCD to build the files with transformation for DEVCD
+     - name: Build DEV CD
+       run: |   
+        msbuild .\d\c\NTTDataAmerica\NTTDataAmerica.sln /restore /p:DeployOnBuild=true /p:WebPublishMethod=FileSystem /p:SkipInvalidConfigurations=true /p:PackageLocation=${{ github.workspace}}\d\a\cd /p:PublishUrl=${{ github.workspace}}\d\a\cd /p:DeployDefaultTarget=WebPublish   
+     # Upload the build artifact to GitHub
+     - name: Upload CM Artifact
+       uses: actions/upload-artifact@v2.2.4
+       with:
+          name: ${{ github.run_id }}-${{ github.run_number }}-dev-cm
+          path: ${{ github.workspace }}\d\a\cm
+
+     # Upload the build artifact to GitHub
+     - name: Upload CD Artifact
+       uses: actions/upload-artifact@v2.2.4
+       with:
+          name: ${{ github.run_id }}-${{ github.run_number }}-dev-cd
+          path: ${{ github.workspace }}\d\a\cd
+    
+  pre-deploy:
+     needs: build-solution
+     runs-on: self-hosted
+     name: Pre-deploy requirement
+     environment: DEV
+     if: github.ref == 'refs/heads/main'
+
+     steps:
+      # Executes a backup of the master database after the build is completed
+      - name: Master Database Backup
+        run: |
+          $secureSQLPassword = ConvertTo-SecureString -String "${{ secrets.DEV_SQL_SERVER_PASSWORD }}" -AsPlainText -Force
+          $devSQLCredentials = New-Object System.Management.Automation.PSCredential("${{ secrets.DEV_SQL_SERVER_USERNAME }}", $secureSQLPassword)
+          Invoke-Command -ComputerName "${{ secrets.DEV_SQL_SERVER }}" -Credential $devSQLCredentials -ScriptBlock {
+          # Set X days to remove old BAK files
+          $removeOldBackFiles = (Get-Date).AddDays(-30)
+          # Delete files older than the $limit.
+          Get-ChildItem -Path ${{ secrets.DEV_SQL_SERVER_BACKUP_PATH }} -Recurse -Force | Where-Object { !$_.PSIsContainer -and $_.CreationTime -lt $limit } | Remove-Item -Force
+          } 
+          # --- Backup of Master Database
+          $devConnectionString = "Data Source=${{ secrets.DEV_SQL_SERVER }};database=${{ secrets.DEV_SQL_SERVER_DATABASE }};User ID=${{ secrets.DEV_SQL_DATABASE_USERNAME }};Password=${{ secrets.DEV_SQL_DATABASE_PASSWORD }};"
+          try {
+            $sqlConnection = New-Object System.Data.SqlClient.SqlConnection $devConnectionString;
+            $sqlConnection.Open();
+            $sqlConnection.Close();
+            $checkConnectivity = $true
+          }
+          catch { $checkConnectivity = $false }
+          if ($checkConnectivity)
+          {
+            $secureSQLPassword = ConvertTo-SecureString -String "${{ secrets.DEV_SQL_SERVER_PASSWORD }}" -AsPlainText -Force
+            $devSQLCredentials = New-Object System.Management.Automation.PSCredential("${{ secrets.DEV_SQL_SERVER_USERNAME }}", $secureSQLPassword)
+            Invoke-Command -ComputerName "${{ secrets.DEV_SQL_SERVER }}" -Credential $devSQLCredentials -ScriptBlock {
+            $secureDBPassword = ConvertTo-SecureString -String "${{ secrets.DEV_SQL_DATABASE_PASSWORD }}" -AsPlainText -Force
+            $devSQLDBCredentials = New-Object System.Management.Automation.PSCredential("${{ secrets.DEV_SQL_DATABASE_USERNAME }}", $secureDBPassword)
+            Backup-SqlDatabase -ServerInstance "${{ secrets.DEV_SQL_SERVER }}" -Database ${{ secrets.DEV_SQL_SERVER_DATABASE }} -BackupFile ${{ secrets.DEV_SQL_SERVER_BACKUP_PATH }}\${{ github.run_id }}-${{ github.run_number }}-${{ secrets.DEV_SQL_SERVER_DATABASE }}.bak -Credential $devSQLDBCredentials
+            } 
+           } else {
+              Write-Output "Connection to ${{ secrets.DEV_SQL_SERVER }} FAILED"
+              exit 1
+           }
+  deploy-solution:
+    needs: pre-deploy # To be executed, it requires the checkout-code step to be sucessfully finished
+    runs-on: self-hosted
+    name: Deploy Solution
+    environment: DEV
+    if: github.ref == 'refs/heads/main'
+    
+    steps:      
+      - name: Stop CM
+        run: |
+           try {
+             Test-Connection -ComputerName ${{ secrets.DEV_CM_SERVER }} -Quiet
+             $connection = $true
+           }
+           catch {
+             $connection = $false
+             $errorMessage = $_.Exception.Message
+           }
+           if ($connection)
+           {
+           try {
+             Invoke-Command -ComputerName ${{ secrets.DEV_CM_SERVER }} -ScriptBlock { Stop-IISSite -Name ${{ secrets.DEV_CM_IIS_SITE }} -Confirm:$false }
+             $isFail = $false
+           }
+           catch {
+             $isFail = $true
+             $errorMessage = $_.Exception.Message
+           }		   
+               
+               Start-Sleep -s 30
+               $serverErrors = 0
+               do {
+                 $statusCode = 0
+                 $isFail = $false
+                 try {
+                   $page = Invoke-WebRequest ${{ secrets.DEV_CM_Website }} -TimeoutSec 60 -UseBasicParsing
+                   $statusCode = $page.StatusCode
+                 }
+                 catch [System.Net.WebException] {
+                   if ($_ -like "*This web app is stopped*" -or ($_ -like "*The operation has timed out*")) {
+                     Write-Host "Site not up yet"
+                     Start-Sleep -s 30
+                   }
+                   else {
+                     $response = $_.Exception.Response
+                     if ($Response.StatusCode -eq [System.Net.HttpStatusCode]::InternalServerError -and $ServerErrors -lt 5)
+                     {
+                        $serverErrors++
+                        Write-Host "Site has an error"
+                        Start-Sleep -s 30
+                     }
+                     else {
+                       $isFail = $true
+                       $errorMessage = $_.Exception.Message
+                     }
+                   }
+                 }
+               } until ($statusCode -eq 200 -or $isFail)
+                 if (!($statusCode -eq 200))
+                 {
+                   Write-Host "Site is down"
+                 }
+                 else {
+                    Write-Host "Site is up, and cannot copy artifacts"
+                    exit 1
+                 }
+           }
+           else {
+             Write-Host "An error has occurred $errorMessage"
+             exit 1
+           }
+           
+      - name: Deploy CM artifacts
+        if: ${{ success() }}
+        run: |
+          try {
+             Test-Connection -ComputerName ${{ secrets.DEV_CM_SERVER }} -Quiet
+             $connection = $true
+          }
+          catch {
+            $connection = $false
+            exit 1
+          }
+          if ($connection)
+          {
+            try {
+              Copy-Item -Path ${{ github.workspace }}\d\a\cm\* -Destination ${{ secrets.DEV_CM_SERVER_PATH }} -Recurse -Force
+            }
+            catch {
+              Write-Host $_.Exception.Message
+              exit 1
+            }
+          }
+          else {
+            Write-Host "Unable to connect to ${{ secrets.DEV_CM_SERVER }}"
+          }
+          Start-Sleep -s 30
+      
+      - name: Start CM
+        run: |
+           try {
+             Test-Connection -ComputerName ${{ secrets.DEV_CM_SERVER }} -Quiet
+             $connection = $true
+           }
+           catch {
+             $connection = $false
+             $errorMessage = $_.Exception.Message
+           }
+           
+           if ($connection)
+           {
+             Invoke-Command -ComputerName ${{ secrets.DEV_CM_SERVER }} -ScriptBlock { Start-IISSite -Name ${{ secrets.DEV_CM_IIS_SITE }} }
+           }
+           else {
+             Write-Host "An error has occurred $errorMessage"
+             exit 1
+           }
+           
+      - name: Warm up CM
+        run: |
+         $serverErrors = 0
+         do {
+           $statusCode = 0
+           $isFail = $false
+           try {
+             $page = Invoke-WebRequest ${{ secrets.DEV_CM_Website }} -TimeoutSec 60 -UseBasicParsing
+             $statusCode = $page.StatusCode
+           }
+           catch [System.Net.WebException] {
+             if ($_ -like "*This web app is stopped*" -or ($_ -like "*The operation has timed out*")) {
+               Write-Host "Site not up yet"
+               Start-Sleep -s 30
+             }
+             else {
+               $response = $_.Exception.Response
+               if ($Response.StatusCode -eq [System.Net.HttpStatusCode]::InternalServerError -and $ServerErrors -lt 5)
+               {
+                 $serverErrors++
+                 Write-Host "Site has an error"
+                 Start-Sleep -s 30
+               }
+               else {
+                 $isFail = $true
+                 $errorMessage = $_.Exception.Message
+               }
+             }
+           }
+         } until ($statusCode -eq 200 -or $isFail)
+         if ($statusCode -eq 200)
+         {
+            Write-Host "Site is up"
+         }
+         else {
+           Write-Host "Site is down"
+           exit 1
+         }
+      - name: Copying Unicorn files to the CM server
+        run: |
+          try {
+             Test-Connection -ComputerName ${{ secrets.DEV_CM_SERVER }} -Quiet
+             $connection = $true
+          }
+          catch {
+            $connection = $false
+            exit 1
+          }
+          if ($connection)
+          {
+          powershell -Command "& C:\dev-unicorn.ps1"
+          }          
+        
+      - name: Unicorn sync
+        run: |
+          Import-Module -Name "C:\actions-runner\_work\_tool\Unicorn\Unicorn.psm1"
+          Sync-Unicorn -ControlPanelUrl "https://devcm2-us.nttdata.com/unicorn.aspx" -SharedSecret ${{ secrets.DEV_CM_UNICORN_SECRET }}
+      - name: Stop CD
+        run: |
+           try {
+             Test-Connection -ComputerName ${{ secrets.DEV_CD_SERVER }} -Quiet
+             $connection = $true
+           }
+           catch {
+             $connection = $false
+             $errorMessage = $_.Exception.Message
+           }
+           if ($connection)
+           {
+               Invoke-Command -ComputerName ${{ secrets.DEV_CD_SERVER }} -ScriptBlock { Stop-IISSite -Name ${{ secrets.DEV_CD_IIS_SITE }} -Confirm:$false }
+               Start-Sleep -s 10
+               $serverErrors = 0
+               do {
+                 $statusCode = 0
+                 $isFail = $false
+                 try {
+                   $page = Invoke-WebRequest ${{ secrets.DEV_CD_Website }} -TimeoutSec 60 -UseBasicParsing
+                   $statusCode = $page.StatusCode
+                 }
+                 catch [System.Net.WebException] {
+                   if ($_ -like "*This web app is stopped*" -or ($_ -like "*The operation has timed out*")) {
+                     Write-Host "Site not up yet"
+                     Start-Sleep -s 30
+                   }
+                   else {
+                     $response = $_.Exception.Response
+                     if ($Response.StatusCode -eq [System.Net.HttpStatusCode]::InternalServerError -and $ServerErrors -lt 5)
+                     {
+                        $serverErrors++
+                        Write-Host "Site has an error"
+                        Start-Sleep -s 30
+                     }
+                     else {
+                       $isFail = $true
+                       $errorMessage = $_.Exception.Message
+                     }
+                   }
+                 }
+               } until ($statusCode -eq 200 -or $isFail)
+                 if (!($statusCode -eq 200))
+                 {
+                   Write-Host "Site is down"
+                 }
+                 else {
+                    Write-Host "Site is up, and cannot copy artifacts"
+                    exit 1
+                 }
+           }
+           else {
+             Write-Host "An error has occurred $errorMessage"
+             exit 1
+           }
+           
+      - name: Deploy CD artifacts
+        if: ${{ success() }}
+        run: |
+          try {
+             Test-Connection -ComputerName ${{ secrets.DEV_CD_SERVER }} -Quiet
+             $connection = $true
+          }
+          catch {
+            $connection = $false
+            exit 1
+          }
+          if ($connection)
+          {
+            try {
+              Copy-Item -Path ${{ github.workspace }}\d\a\cd\* -Destination ${{ secrets.DEV_CD_SERVER_PATH }} -Recurse -Force
+            }
+            catch {
+              Write-Host $_.Exception.Message
+              exit 1
+            }
+          }
+          else {
+            Write-Host "Unable to connect to ${{ secrets.DEV_CD_SERVER }}"
+          }
+      
+      - name: Start CD
+        run: |
+           try {
+             Test-Connection -ComputerName ${{ secrets.DEV_CD_SERVER }} -Quiet
+             $connection = $true
+           }
+           catch {
+             $connection = $false
+             $errorMessage = $_.Exception.Message
+           }
+           
+           if ($connection)
+           {
+             Invoke-Command -ComputerName ${{ secrets.DEV_CD_SERVER }} -ScriptBlock { Start-IISSite -Name ${{ secrets.DEV_CD_IIS_SITE }} }
+           }
+           else {
+             Write-Host "An error has occurred $errorMessage"
+             exit 1
+           }
+      # - name: Warm up CD
+        # run: |
+         # $serverErrors = 0
+         # do {
+           # $statusCode = 0
+           # $isFail = $false
+           # try {
+             # $page = Invoke-WebRequest ${{ secrets.DEV_CD_Website }} -TimeoutSec 60 -UseBasicParsing
+             # $statusCode = $page.StatusCode
+           # }
+           # catch [System.Net.WebException] {
+             # if ($_ -like "*This web app is stopped*" -or ($_ -like "*The operation has timed out*")) {
+               # Write-Host "Site not up yet"
+               # Start-Sleep -s 30
+             # }
+             # else {
+               # $response = $_.Exception.Response
+               # if ($Response.StatusCode -eq [System.Net.HttpStatusCode]::InternalServerError -and $ServerErrors -lt 5)
+               # {
+                 # $serverErrors++
+                 # Write-Host "Site has an error"
+                 # Start-Sleep -s 30
+               # }
+               # else {
+                 # $isFail = $true
+                 # $errorMessage = $_.Exception.Message
+               # }
+             # }
+           # }
+         # } until ($statusCode -eq 200 -or $isFail)
+         # if ($statusCode -eq 200)
+         # {
+            # Write-Host "Site is up"
+         # }
+         # else {
+           # Write-Host "Site is down"
+           # exit 1
+         # }
+      - name: Send notification
+        if: ${{ false }}
+        #if: always()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          # mail server settings
+           server_address: NTTDSSMTPRelayCorp.nttdata.com
+           server_port: 25
+          # user credentials
+      #    username: ${{ secrets.EMAIL_USERNAME }}
+      #    password: ${{ secrets.EMAIL_PASSWORD }}
+          # email subject
+           subject: ${{ github.job }} job of ${{ github.repository }} has ${{ job.status }}
+          # email body as text
+           body: ${{ github.job }} job in worflow ${{ github.workflow }} of ${{ github.repository }} has ${{ job.status }}
+          # comma-separated string, send email to
+           to: Jonathan.Dahm@nttdata.com
+          # from email name
+           from: GitHub Actions
+           #end

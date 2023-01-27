@@ -1,0 +1,3 @@
+To use msbuild commonds go till bin path and open cmd then use this commond
+MSBuild D:\WR_Vasu\agent\_cpUpgradework\10\s\FIS.Sc.Extranet.sln /p:DeployOnBuild=true /p:DeployDefaultTarget=WebPublish /p:WebPublishMethod=FileSystem /p:Configuration=UATCD1 /p:SkipInvalidConfigurations=true /p:publishUrl="D:\Test"
+

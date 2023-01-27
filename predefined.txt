@@ -1,0 +1,21 @@
+ntcfjod443qzqysznq3nyzdekrrssah7r6wj7oh6opugdmr5s4cq
+
+C:\ProgramData\Microsoft\Azure DevOps\Server Configuration\Logs\TFS_Proxy Configuration_1028_134722.log
+
+
+Copy Files to: $(build.artifactstagingdirectory)
+
+$(system.defaultworkingdirectory) source folder
+
+$(build.artifactstagingdirectory) target folder
+
+$(Build.SourcesDirectory)
+
+Build.SourcesDirectory
+
+https://kubernetes.io/docs/tasks/tools/install-kubectl-linux/
+
+https://www.linuxtechi.com/how-to-install-minikube-on-ubuntu/
+
+
+How to install minikube
